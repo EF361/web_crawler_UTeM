@@ -1,160 +1,189 @@
-import time
-import re
-import shutil
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urljoin, urlparse
+import asyncio
+import nest_asyncio
+from urllib.parse import urljoin, urlparse, urldefrag
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.by import By
-from selenium_stealth import stealth
+from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
 
-thread_local = threading.local()
-active_drivers = [] 
+nest_asyncio.apply()
 
-def get_driver():
-    options = Options()
-    
-    # 1. Background processing and stability
-    options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
-    
-    # 2. Stealth Mode (Look like a normal Windows user)
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-    
-    # 3. Speed Upgrade (Block heavy images and styling)
-    prefs = {
-        "profile.managed_default_content_settings.images": 2,
-        "profile.managed_default_content_settings.stylesheet": 2
-    }
-    options.add_experimental_option("prefs", prefs)
-    options.add_argument("--blink-settings=imagesEnabled=false")
-    
-    # 4. Universal Setup (Using Built-in Selenium Manager)
-    # No Service or ChromeDriverManager needed! Selenium handles it automatically.
-    driver = webdriver.Chrome(options=options)
-    
-    # 5. Final Stealth Trick
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    
-    return driver
-
-def get_thread_driver():
-    if not hasattr(thread_local, "driver"):
-        driver = get_driver()
-        thread_local.driver = driver
-        active_drivers.append(driver)
-    return thread_local.driver
-
-def process_single_page(url, base_domain, ignore_words):
-    driver = get_thread_driver()
-    page_data = []
-    new_urls = []
-    
-    try:
-        driver.get(url)
-        
-        # --- NEW: CLOUDFLARE WAITER ---
-        # Wait up to 15 seconds in the "waiting room" for the security check to pass
-        for _ in range(15):
-            page_text = driver.page_source.lower()
-            if "performing security verification" in page_text or "just a moment" in page_text:
-                time.sleep(1) # Wait 1 second and check again
-            else:
-                break # Security passed, proceed to scrape!
-        # ------------------------------
-        
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        
-        title_tag = soup.find('title')
-        page_title = title_tag.text.strip() if title_tag else "No Title"
-        
-        body_tag = soup.find('body')
-        if body_tag:
-            full_page_text = body_tag.get_text(separator='\n', strip=True)
-        else:
-            full_page_text = ""
-            
-        if full_page_text:
-            page_data.append({
-                "title": page_title,
-                "url": url,
-                "html": full_page_text
-            })
-                    
-        for link in soup.find_all('a', href=True):
-            full_url = urljoin(url, link['href']).split('#')[0] 
-            should_ignore = any(word.lower() in full_url.lower() for word in ignore_words)
-            if not should_ignore and urlparse(full_url).netloc == base_domain:
-                new_urls.append(full_url)
-                
-    except Exception as e:
-        print(f"Failed on {url}: {e}")
-        
-    return page_data, new_urls
-
-def scrape_multiple_pages(start_url, max_pages=5, ignore_words=None):
-    if ignore_words is None:
-        ignore_words = []
+async def crawl_single_site_async(crawler, start_url, max_pages, ignore_words, run_config, dispatcher):
+    IGNORE_EXTS = ('.pdf', '.jpg', '.jpeg', '.png', '.gif', '.zip', '.rar', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.mp3', '.mp4', '.avi', '.svg')
         
     data = []
     error_message = None
-    visited_urls = set()
-    urls_to_visit = [start_url]
-    base_domain = urlparse(start_url).netloc
+    page_errors = []
+    max_depth = 5
     
-    max_workers = 2 
+    base_domain = urlparse(start_url).netloc
+    visited = set()
+
+    def normalize_url(url):
+        return urldefrag(url)[0]
+
+    current_urls = {normalize_url(start_url)}
     
     try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            while urls_to_visit and len(visited_urls) < max_pages:
+        for depth in range(max_depth):
+            if len(data) >= max_pages:
+                break
+            
+            urls_to_crawl = []
+            for u in current_urls:
+                if u not in visited:
+                    parsed_u = urlparse(u)
+                    should_ignore = any(word.lower() in u.lower() for word in ignore_words)
+                    is_ignored_ext = parsed_u.path.rstrip('/').lower().endswith(IGNORE_EXTS)
+                    if not should_ignore and not is_ignored_ext and parsed_u.netloc == base_domain:
+                        urls_to_crawl.append(u)
+            
+            urls_to_crawl = urls_to_crawl[:max_pages - len(data)]
+            
+            if not urls_to_crawl:
+                break
+
+            results = await crawler.arun_many(urls=urls_to_crawl, config=run_config, dispatcher=dispatcher)
+            next_level_urls = set()
+
+            for result in results:
+                norm_url = normalize_url(result.url)
+                visited.add(norm_url)
                 
-                batch_size = min(max_workers, max_pages - len(visited_urls), len(urls_to_visit))
-                current_batch = []
-                
-                for _ in range(batch_size):
-                    url = urls_to_visit.pop(0)
-                    if url not in visited_urls:
-                        current_batch.append(url)
-                        visited_urls.add(url)
-                
-                if not current_batch:
+                if not result.success:
+                    page_errors.append(f"Failed on {result.url}: {getattr(result, 'error_message', 'Unknown error')}")
                     continue
                     
-                futures = {executor.submit(process_single_page, url, base_domain, ignore_words): url for url in current_batch}
-                
-                for future in as_completed(futures):
-                    page_data, new_urls = future.result()
+                if result.success and (result.markdown or result.html):
+                    title = "No Title"
+                    content = result.markdown if result.markdown else ""
                     
-                    for item in page_data:
-                        item['id'] = len(data) + 1
-                        data.append(item)
+                    if result.html:
+                        soup = BeautifulSoup(result.html, 'html.parser')
+                        title_tag = soup.find('title')
+                        if title_tag:
+                            title = title_tag.text.strip()
+                        if not content:
+                            content = soup.get_text(separator='\n', strip=True)
+                    
+                    import re
+                    from datetime import datetime, timezone
+                    
+                    # Clean up content_text
+                    content = re.sub(r'!\[.*?\]\([^\)]+\)', '', content)
+                    content = re.sub(r'\[([^\]]*)\]\([^\)]+\)', r'\1', content)
+                    gdpr_regex = r'\*?\s*Privacy Overview\s+\*?\s*Strictly Necessary Cookies\s+Privacy Overview\s+This website uses cookies.*?Enable All Save Settings\n?'
+                    content = re.sub(gdpr_regex, '', content, flags=re.IGNORECASE | re.DOTALL)
+                    cookie_notice_regex = r'We are using cookies to give you the best experience on our website\.\s+You can find out more about which cookies we are using or switch them off in settings\.\s+Accept\s+.*?Close GDPR Cookie Settings'
+                    content = re.sub(cookie_notice_regex, '', content, flags=re.IGNORECASE | re.DOTALL)
+                    content = re.sub(r'\n{3,}', '\n\n', content).strip()
+                    
+                    item_id_str = "utem_" + re.sub(r'[^a-zA-Z0-9]', '_', urlparse(result.url).netloc + urlparse(result.url).path).strip('_')
+                    
+                    meta_desc = None
+                    meta_kw = None
+                    if result.html:
+                        desc_tag = soup.find('meta', attrs={'name': 'description'})
+                        if desc_tag: meta_desc = desc_tag.get('content')
+                        kw_tag = soup.find('meta', attrs={'name': 'keywords'})
+                        if kw_tag: meta_kw = kw_tag.get('content')
                         
-                    for new_url in new_urls:
-                        if new_url not in visited_urls and new_url not in urls_to_visit:
-                            urls_to_visit.append(new_url)
-                            
+                    metadata = {
+                        "source_domain": urlparse(result.url).netloc,
+                        "language": "en",
+                        "page_type": "content_page",
+                        "last_update": "",
+                        "canonical_url": result.url,
+                        "meta_description": meta_desc,
+                        "meta_keywords": meta_kw,
+                        "crawled_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "record_ID": len(data) + 1
+                    }
+                    
+                    item = {
+                        "id": item_id_str,
+                        "url": result.url,
+                        "title": title,
+                        "metadata": metadata,
+                        "content_text": content
+                    }
+                    data.append(item)
+
+                    if hasattr(result, 'links') and isinstance(result.links, dict):
+                        for link in result.links.get("internal", []):
+                            href = link.get("href", "")
+                            if href:
+                                next_url = normalize_url(urljoin(result.url, href))
+                                if next_url not in visited:
+                                    parsed_next = urlparse(next_url)
+                                    if not parsed_next.path.rstrip('/').lower().endswith(IGNORE_EXTS):
+                                        next_level_urls.add(next_url)
+                                    
+            current_urls = next_level_urls
+
     except Exception as e:
-        error_message = f"Error during crawl: {str(e)}"
-        
-    finally:
-        for d in active_drivers:
-            try:
-                d.quit()
-            except:
-                pass
-        active_drivers.clear()
-        
+        error_message = f"Error during crawl on {start_url}: {str(e)}"
+
     if not data and not error_message:
-        error_message = "No text found on the visited pages."
+        if page_errors:
+            error_message = page_errors[0]
+        else:
+            error_message = f"No text found on {start_url}"
         
     return data, error_message
+
+async def scrape_multiple_pages_async(start_urls, max_pages=5, ignore_words=None):
+    if ignore_words is None:
+        ignore_words = []
+        
+    if isinstance(start_urls, str):
+        start_urls = [start_urls]
+        
+    max_concurrent = 5
+    
+    run_config = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS, 
+        stream=False,
+    )
+    
+    dispatcher = MemoryAdaptiveDispatcher(
+        memory_threshold_percent=95.0,
+        check_interval=1.0,
+        max_session_permit=max_concurrent
+    )
+
+    all_results = {}
+
+    try:
+        async with AsyncWebCrawler() as crawler:
+            tasks = []
+            for url in start_urls:
+                tasks.append(crawl_single_site_async(crawler, url, max_pages, ignore_words, run_config, dispatcher))
+                
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for idx, res in enumerate(results):
+                url = start_urls[idx]
+                if isinstance(res, Exception):
+                    all_results[url] = {"data": [], "error": f"Fatal error on {url}: {str(res)}"}
+                else:
+                    data, err = res
+                    all_results[url] = {"data": data if data else [], "error": err}
+    except Exception as e:
+        all_results["crawler_error"] = {"data": [], "error": f"Crawler session error: {str(e)}"}
+
+    return all_results
+
+def scrape_multiple_pages(start_urls, max_pages=5, ignore_words=None):
+    import sys
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+    import nest_asyncio
+    nest_asyncio.apply(loop)
+    
+    return loop.run_until_complete(scrape_multiple_pages_async(start_urls, max_pages, ignore_words))

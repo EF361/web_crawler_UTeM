@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import pandas as pd
 from scraper_raw import scrape_multiple_pages
+from urllib.parse import urlparse
 
 # --- UTeM Portal Directory ---
 UTEM_URLS = {
@@ -44,7 +45,7 @@ st.set_page_config(
     page_title="Web Crawler",
     page_icon="🕷️",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # 2. Setup App Memory (Session State)
@@ -52,6 +53,8 @@ if "scraped_data" not in st.session_state:
     st.session_state.scraped_data = None
 if "final_filename" not in st.session_state:
     st.session_state.final_filename = "data.json"
+if "target_urls" not in st.session_state:
+    st.session_state.target_urls = []
 
 # 3. Custom CSS
 st.markdown("""
@@ -64,95 +67,164 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 4. Main Layout
-left_panel, right_panel = st.columns([1, 2], gap="large")
 
-with left_panel:
-    st.title("🕷️ Web Crawler")
-    st.write("") 
-    
-    # Dropdown menu for UTeM portals
-    selected_site = st.selectbox("🎯 Select Target UTeM Portal:", list(UTEM_URLS.keys()) + ["Custom URL..."])
-    
-    # Handle custom URL input
-    if selected_site == "Custom URL...":
-        url_input = st.text_input("🌐 Enter Custom URL:", "https://")
-        default_filename = "crawler_data.json"
-    else:
-        url_input = UTEM_URLS[selected_site]
-        # Automatically generate a clean filename based on the selection (e.g., FAIX_data.json)
-        default_filename = f"{selected_site.split(' ')[0]}_data.json"
-        
-    max_pages_input = st.number_input("📄 Max Pages to Crawl:", min_value=1, value=200)
-    
-    with st.expander("🛠️ Advanced Options", expanded=False):
-        ignore_input = st.text_input("🚫 Ignore URLs containing:", "contact, login, register, admin")
-        filename_input = st.text_input("💾 Save file as:", default_filename)
-    
-    start_crawling = st.button("🚀 Start Crawling", type="primary", use_container_width=True)
+def crawler_page():
+    # 4. Main Layout
+    left_panel, right_panel = st.columns([1, 2], gap="large")
 
-with right_panel:
-    # Trigger the crawling process
-    if start_crawling:
-        # Clear old memory before starting a new crawl
-        st.session_state.scraped_data = None 
+    with left_panel:
+        st.title("🕷️ Web Crawler")
+        st.write("") 
         
-        ignore_list = [word.strip() for word in ignore_input.split(',')]
+        st.markdown("### 1. Add Target URLs")
         
-        if not filename_input.endswith(".json"):
-            filename_input += ".json"
-            
-        with st.status("🤖 Crawler is working...", expanded=True) as status:
-            st.write(f"Connecting to {url_input}...")
-            st.write(f"Scraping up to {max_pages_input} pages...")
-            
-            scraped_data, error_msg = scrape_multiple_pages(url_input, max_pages_input, ignore_list)
-            
-            if error_msg:
-                status.update(label="Crawling Failed", state="error", expanded=True)
-                st.error(error_msg)
-            elif not scraped_data:
-                status.update(label="No Data Found", state="warning", expanded=True)
-                st.warning("Crawling finished, but no useful text was found.")
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            # Modified to show URL directly
+            url_choices = list(UTEM_URLS.values()) + ["Custom URL..."]
+            selected_url = st.selectbox("🎯 Select Target UTeM Portal URL:", url_choices)
+            if selected_url == "Custom URL...":
+                url_input = st.text_input("🌐 Enter Custom URL:", "https://")
             else:
-                status.update(label="Crawling Complete!", state="complete", expanded=False)
-                # Save the successful data to the app's memory
-                st.session_state.scraped_data = scraped_data
-                st.session_state.final_filename = filename_input
+                url_input = selected_url
+                
+        with col2:
+            st.write("")
+            st.write("")
+            if st.button("➕ Add URL", use_container_width=True):
+                if url_input and url_input not in st.session_state.target_urls:
+                    st.session_state.target_urls.append(url_input)
+                    st.rerun()
+                    
+        st.markdown("**Current Crawl Queue:**")
+        if st.session_state.target_urls:
+            for i, url in enumerate(st.session_state.target_urls):
+                c1, c2 = st.columns([8, 1])
+                c1.code(url)
+                if c2.button("❌", key=f"del_{i}"):
+                    st.session_state.target_urls.pop(i)
+                    st.rerun()
+            if st.button("🗑️ Clear All", use_container_width=True):
+                st.session_state.target_urls = []
+                st.rerun()
+        else:
+            st.info("Queue is empty. Add URLs to begin.")
+            
+        st.markdown("### 2. Configure & Start")
+            
+        max_pages_input = st.number_input("📄 Max Pages per site:", min_value=1, value=200)
+        
+        with st.expander("🛠️ Advanced Options", expanded=False):
+            ignore_input = st.text_input("🚫 Ignore URLs containing:", "contact, login, register, admin")
+        
+        start_crawling = st.button("🚀 Start Crawling Queue", type="primary", use_container_width=True)
 
-    # Display the results if they exist in memory (survives screen refreshes)
-    if st.session_state.scraped_data:
-        data = st.session_state.scraped_data
-        filename = st.session_state.final_filename
-        
-        st.success(f"🎉 Success! Extracted {len(data)} clean items ready for AI.")
-        
-        json_string = json.dumps(data, indent=4)
-        csv_data = pd.DataFrame(data).to_csv(index=False).encode('utf-8')
-        
-        # Side-by-Side Download Buttons
-        btn_col1, btn_col2 = st.columns(2)
-        with btn_col1:
-            st.download_button(
-                label="📥 Download JSON",
-                data=json_string,
-                file_name=filename,
-                mime="application/json",
-                use_container_width=True
-            )
-        with btn_col2:
-            st.download_button(
-                label="📥 Download CSV",
-                data=csv_data,
-                file_name=filename.replace(".json", ".csv"),
-                mime="text/csv",
-                use_container_width=True
-            )
-        
-        # Clean Tabbed Preview
-        st.markdown("### Data Preview")
-        tab1, tab2 = st.tabs(["📊 Table View", "💻 Raw JSON View"])
-        with tab1:
-            st.dataframe(pd.DataFrame(data), width='stretch', height=400)
-        with tab2:
-            st.json(data)
+    with right_panel:
+        # Trigger the crawling process
+        if start_crawling:
+            if not st.session_state.target_urls:
+                st.warning("Please add at least one URL to the queue first.")
+            else:
+                st.session_state.scraped_data = None 
+                
+                ignore_list = [word.strip() for word in ignore_input.split(',')]
+                
+                with st.status("🤖 Crawling multiple sites in parallel...", expanded=True) as status:
+                    st.write(f"Starting parallel crawl for {len(st.session_state.target_urls)} websites...")
+                    
+                    # Call scrape_multiple_pages which now returns a dictionary per URL
+                    results = scrape_multiple_pages(st.session_state.target_urls, max_pages_input, ignore_list)
+                    
+                    if "crawler_error" in results:
+                        st.error(f"Fatal Session Error: {results['crawler_error']['error']}")
+                        status.update(label="Crawling Failed", state="error", expanded=True)
+                    else:
+                        status.update(label="Crawling Complete!", state="complete", expanded=False)
+                        st.session_state.scraped_data = results
+
+        # Display the results separately using tabs
+        if st.session_state.scraped_data and "crawler_error" not in st.session_state.scraped_data:
+            results = st.session_state.scraped_data
+            urls = list(results.keys())
+            
+            st.success(f"🎉 Crawl finished for {len(urls)} websites. Browse results below.")
+            
+            tabs = st.tabs([urlparse(u).netloc or u for u in urls])
+            
+            for i, url in enumerate(urls):
+                with tabs[i]:
+                    site_data = results[url].get("data", [])
+                    site_error = results[url].get("error", None)
+                    
+                    if site_error:
+                        st.warning(f"Issues encountered during crawl: {site_error}")
+                        
+                    if not site_data:
+                        st.info("No data extracted for this URL.")
+                    else:
+                        st.markdown(f"✅ **Extracted {len(site_data)} items.**")
+                        
+                        json_string = json.dumps(site_data, indent=4)
+                        csv_data = pd.DataFrame(site_data).to_csv(index=False).encode('utf-8')
+                        
+                        domain = urlparse(url).netloc.replace(".", "_")
+                        
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.download_button(
+                                label="📥 Download JSON",
+                                data=json_string,
+                                file_name=f"{domain}_data.json",
+                                mime="application/json",
+                                use_container_width=True,
+                                key=f"json_{i}"
+                            )
+                        with c2:
+                            st.download_button(
+                                label="📥 Download CSV",
+                                data=csv_data,
+                                file_name=f"{domain}_data.csv",
+                                mime="text/csv",
+                                use_container_width=True,
+                                key=f"csv_{i}"
+                            )
+                            
+                        st.markdown("#### Data Preview")
+                        st.dataframe(pd.DataFrame(site_data), width='stretch', height=400)
+
+
+def guide_page():
+    st.title("📖 User Guide")
+    st.markdown("""
+    Welcome to the UTeM Web Crawler tool! Follow these steps to collect data for your AI models:
+    
+    ### 1. Select Target Portals
+    - In the **Crawler** page, use the dropdown to select a UTeM portal URL (e.g., `https://faix.utem.edu.my/`).
+    - If your desired portal is not listed, choose **Custom URL...** and enter it manually.
+    - Click **➕ Add URL** to add it to your crawl queue.
+    - You can queue as many portals as you want. They will be crawled simultaneously.
+    
+    ### 2. Configure Limits
+    - **Max Pages per site:** Set a limit to prevent the crawler from running indefinitely. (Default is 200).
+    - **Advanced Options:** Define URL paths to ignore (e.g., login pages or admin panels).
+    
+    ### 3. Start Crawling
+    - Click **🚀 Start Crawling Queue**.
+    - The crawler will process all queued websites in parallel. Please be patient, as fetching hundreds of pages takes time.
+    
+    ### 4. Review & Export
+    - Once completed, you can review the extracted text in the **Data Preview** section.
+    - The results are split into **Tabs** for each website.
+    - In each tab, you can individually export that website's data via the **Download JSON** or **Download CSV** buttons!
+    """)
+
+
+# Navigation Setup (Requires Streamlit >= 1.36)
+with st.sidebar:
+    st.info("UTeM Tuah RAG - Data Collection Tool")
+    
+pg = st.navigation([
+    st.Page(crawler_page, title="Crawler", icon="🕷️"),
+    st.Page(guide_page, title="User Guide", icon="📖")
+])
+pg.run()

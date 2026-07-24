@@ -27,15 +27,18 @@ call venv\Scripts\activate
 
 :: 4. Install and Update Dependencies
 echo [INFO] Upgrading package manager...
-python -m pip install --upgrade pip -q
+python -m pip install --upgrade pip -q --trusted-host pypi.org --trusted-host files.pythonhosted.org
 
 echo [INFO] Installing required AI and scraping libraries...
-pip install -r requirements.txt -q
+pip install -r requirements.txt -q --trusted-host pypi.org --trusted-host files.pythonhosted.org
+
+echo [INFO] Installing Playwright browsers for Crawl4AI...
+python -m playwright install --with-deps chromium
 
 :: 5. Launch the App
 echo.
 echo [INFO] Starting the Crawler! A browser window should open shortly...
 echo =========================================
-streamlit run app.py
+python -m streamlit run app.py
 
 pause
