@@ -49,7 +49,10 @@ async def crawl_single_site_async(crawler, start_url, max_pages, ignore_words, r
                 visited.add(norm_url)
                 
                 if not result.success:
-                    page_errors.append(f"Failed on {result.url}: {getattr(result, 'error_message', 'Unknown error')}")
+                    page_errors.append({
+                        "url": result.url,
+                        "error": getattr(result, 'error_message', 'Unknown error')
+                    })
                     continue
                     
                 if result.success and (result.markdown or result.html):
@@ -124,11 +127,11 @@ async def crawl_single_site_async(crawler, start_url, max_pages, ignore_words, r
 
     if not data and not error_message:
         if page_errors:
-            error_message = page_errors[0]
+            error_message = f"Failed on {page_errors[0]['url']}: {page_errors[0]['error']}"
         else:
             error_message = f"No text found on {start_url}"
         
-    return data, error_message
+    return data, error_message, page_errors
 
 async def scrape_multiple_pages_async(start_urls, max_pages=5, ignore_words=None):
     if ignore_words is None:
@@ -163,12 +166,12 @@ async def scrape_multiple_pages_async(start_urls, max_pages=5, ignore_words=None
             for idx, res in enumerate(results):
                 url = start_urls[idx]
                 if isinstance(res, Exception):
-                    all_results[url] = {"data": [], "error": f"Fatal error on {url}: {str(res)}"}
+                    all_results[url] = {"data": [], "error": f"Fatal error on {url}: {str(res)}", "page_errors": []}
                 else:
-                    data, err = res
-                    all_results[url] = {"data": data if data else [], "error": err}
+                    data, err, p_errors = res
+                    all_results[url] = {"data": data if data else [], "error": err, "page_errors": p_errors}
     except Exception as e:
-        all_results["crawler_error"] = {"data": [], "error": f"Crawler session error: {str(e)}"}
+        all_results["crawler_error"] = {"data": [], "error": f"Crawler session error: {str(e)}", "page_errors": []}
 
     return all_results
 

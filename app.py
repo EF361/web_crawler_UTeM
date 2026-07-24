@@ -155,6 +155,7 @@ def crawler_page():
                 with tabs[i]:
                     site_data = results[url].get("data", [])
                     site_error = results[url].get("error", None)
+                    page_errors = results[url].get("page_errors", [])
                     
                     if site_error:
                         st.warning(f"Issues encountered during crawl: {site_error}")
@@ -191,6 +192,25 @@ def crawler_page():
                             
                         st.markdown("#### Data Preview")
                         st.dataframe(pd.DataFrame(site_data), width='stretch', height=400)
+                    
+                    if page_errors:
+                        st.markdown("---")
+                        st.markdown("#### ⚠️ Error Logs")
+                        st.info(f"Failed to fetch {len(page_errors)} pages from this site.")
+                        
+                        err_df = pd.DataFrame(page_errors)
+                        domain = urlparse(url).netloc.replace(".", "_")
+                        err_csv = err_df.to_csv(index=False).encode('utf-8')
+                        
+                        st.download_button(
+                            label="📥 Download Error Logs (CSV)",
+                            data=err_csv,
+                            file_name=f"{domain}_errors.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                            key=f"err_csv_{i}"
+                        )
+                        st.dataframe(err_df, width='stretch', height=250)
 
 
 def guide_page():
